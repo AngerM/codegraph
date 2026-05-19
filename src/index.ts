@@ -57,9 +57,9 @@ export {
   findNearestCodeGraphRoot,
   CODEGRAPH_DIR,
 } from './directory';
-export { IndexProgress, IndexResult, SyncResult } from './extraction';
+export type { IndexProgress, IndexResult, SyncResult } from './extraction';
 export { detectLanguage, isLanguageSupported, isGrammarLoaded, getSupportedLanguages, initGrammars, loadGrammarsForLanguages, loadAllGrammars } from './extraction';
-export { ResolutionResult } from './resolution';
+export type { ResolutionResult } from './resolution';
 export {
   CodeGraphError,
   FileError,
@@ -68,14 +68,15 @@ export {
   SearchError,
   VectorError,
   ConfigError,
-  Logger,
   setLogger,
   getLogger,
   silentLogger,
   defaultLogger,
 } from './errors';
+export type { Logger } from './errors';
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
-export { FileWatcher, WatchOptions } from './sync';
+export { FileWatcher } from './sync';
+export type { WatchOptions } from './sync';
 export { MCPServer } from './mcp';
 
 /**
@@ -554,15 +555,6 @@ export class CodeGraph {
     const stats = this.queries.getStats();
     stats.dbSizeBytes = this.db.getSize();
     return stats;
-  }
-
-  /**
-   * Active SQLite backend for this project's connection (`node-sqlite` — Node's
-   * built-in real-SQLite module). Surfaced via `codegraph status` and the
-   * `codegraph_status` MCP tool alongside the effective journal mode.
-   */
-  getBackend(): import('./db').SqliteBackend {
-    return this.db.getBackend();
   }
 
   /**

@@ -1,8 +1,11 @@
 /**
- * SQLite backend reporting.
+ * SQLite adapter sanity tests
  *
- * node:sqlite (Node's built-in real SQLite) is the sole backend. Pin that
- * DatabaseConnection / CodeGraph report it and come up in WAL.
+ * After the switch to `bun:sqlite` there is no longer a native-vs-WASM
+ * backend distinction. These tests just exercise the public surface
+ * (open/close, prepare/run/get/all, transactions, named params) so a
+ * regression in the thin adapter shows up immediately rather than as a
+ * mysterious query failure deeper in the stack.
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
@@ -12,7 +15,7 @@ import * as os from 'os';
 import { DatabaseConnection } from '../src/db';
 import { CodeGraph } from '../src';
 
-describe('DatabaseConnection — backend reporting', () => {
+describe('DatabaseConnection — bun:sqlite adapter', () => {
   let dir: string;
 
   beforeEach(() => {
@@ -25,18 +28,33 @@ describe('DatabaseConnection — backend reporting', () => {
     }
   });
 
-  it('reports the node-sqlite backend in WAL for an initialized DB', () => {
-    const conn = DatabaseConnection.initialize(path.join(dir, 'test.db'));
-    expect(conn.getBackend()).toBe('node-sqlite');
-    expect(conn.getJournalMode()).toBe('wal');
+  it('initializes a database and reports it as open', () => {
+    const dbPath = path.join(dir, 'test.db');
+    const conn = DatabaseConnection.initialize(dbPath);
+    expect(conn.isOpen()).toBe(true);
     conn.close();
+    expect(conn.isOpen()).toBe(false);
   });
 
-  it('CodeGraph.getBackend() delegates to the underlying DatabaseConnection', async () => {
+  it('persists schema across init and open', () => {
+    const dbPath = path.join(dir, 'test.db');
+    const c1 = DatabaseConnection.initialize(dbPath);
+    c1.close();
+
+    const c2 = DatabaseConnection.open(dbPath);
+    const version = c2.getSchemaVersion();
+    expect(version).not.toBeNull();
+    expect(version!.version).toBeGreaterThan(0);
+    c2.close();
+  });
+
+  it('CodeGraph indexes a tiny project end-to-end', async () => {
     fs.writeFileSync(path.join(dir, 'x.ts'), `export function x(): void {}\n`);
     const cg = await CodeGraph.init(dir, { index: true });
     try {
-      expect(cg.getBackend()).toBe('node-sqlite');
+      const stats = cg.getStats();
+      expect(stats.fileCount).toBeGreaterThan(0);
+      expect(stats.nodeCount).toBeGreaterThan(0);
     } finally {
       cg.destroy();
     }

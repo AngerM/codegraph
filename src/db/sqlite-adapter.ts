@@ -1,13 +1,13 @@
 /**
  * SQLite Adapter
  *
- * Thin wrapper over Node's built-in `node:sqlite` (`DatabaseSync`), exposed
- * through a small better-sqlite3-shaped interface so the rest of the codebase
- * is storage-agnostic.
+ * Thin wrapper around `bun:sqlite` exposing a better-sqlite3-style
+ * interface so the rest of CodeGraph can stay backend-agnostic. The
+ * adapter translates @named SQL params to positional `?` so callers
+ * can keep passing plain `{ name: value }` objects without prefixing.
  *
- * CodeGraph ships with a bundled Node runtime, so `node:sqlite` (real SQLite,
- * with WAL + FTS5) is always available — there is no native build step and no
- * wasm fallback. When run from source instead, it requires Node >= 22.5.
+ * Requires the Bun runtime — `bun:sqlite` is a built-in module and is
+ * not available under Node.js.
  */
 
 export interface SqliteStatement {
@@ -16,61 +16,113 @@ export interface SqliteStatement {
   all(...params: any[]): any[];
 }
 
+export interface SqlitePragmaOptions {
+  /** Return a single scalar value (the first column of the first row). */
+  simple?: boolean;
+}
+
 export interface SqliteDatabase {
   prepare(sql: string): SqliteStatement;
   exec(sql: string): void;
-  pragma(str: string, options?: { simple?: boolean }): any;
+  pragma(str: string, options?: SqlitePragmaOptions): any;
   transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T;
   close(): void;
   readonly open: boolean;
 }
 
 /**
- * The active SQLite backend. Only one now (`node:sqlite`); kept as a named type
- * so `codegraph status` and the per-instance reporting have a stable shape.
+ * Translate @named parameters (better-sqlite3 style) to positional ?
+ * params. bun:sqlite supports SQLite-native `$name` / `:name` / `@name`
+ * binding, but the rest of CodeGraph was written against better-sqlite3
+ * and passes plain `{ name: value }` objects (no prefix). Rewriting the
+ * SQL lets us keep every call site untouched.
+ *
+ * Returns the rewritten SQL and an ordered list of parameter names.
+ * Returns null for paramOrder when no named params were found.
  */
-export type SqliteBackend = 'node-sqlite';
+function translateNamedParams(sql: string): { sql: string; paramOrder: string[] | null } {
+  const paramOrder: string[] = [];
+  const rewritten = sql.replace(/@(\w+)/g, (_match, name: string) => {
+    paramOrder.push(name);
+    return '?';
+  });
+  if (paramOrder.length === 0) {
+    return { sql, paramOrder: null };
+  }
+  return { sql: rewritten, paramOrder };
+}
 
 /**
- * Wraps Node's built-in `node:sqlite` (`DatabaseSync`) to match the
- * better-sqlite3 interface the rest of the code expects.
+ * Map better-sqlite3-style call args to a positional varargs array.
  *
- * node:sqlite is real SQLite compiled into Node, so it supports WAL, FTS5,
- * mmap, and `@named` params natively — the only shims needed are the
- * better-sqlite3 conveniences node:sqlite omits: a `.pragma()` helper, a
- * `.transaction()` helper, and `open` (node:sqlite exposes `isOpen`).
+ * - Named object: run({ id: '1', name: 'a' }) → values ordered by paramOrder
+ * - Positional varargs: run('a', 'b') → ['a', 'b']
+ * - No args: run() → []
  */
-class NodeSqliteAdapter implements SqliteDatabase {
+function resolveParams(params: any[], paramOrder: string[] | null): any[] {
+  if (params.length === 0) return [];
+
+  if (
+    paramOrder &&
+    params.length === 1 &&
+    params[0] !== null &&
+    typeof params[0] === 'object' &&
+    !Array.isArray(params[0]) &&
+    !(params[0] instanceof Uint8Array)
+  ) {
+    const obj = params[0];
+    return paramOrder.map((name) => obj[name]);
+  }
+
+  return params;
+}
+
+/**
+ * Wraps `bun:sqlite`'s `Database` so it matches the better-sqlite3
+ * interface the rest of the codebase was written against.
+ *
+ * Key differences handled:
+ * - bun:sqlite has no `pragma()` method — emulated via `exec` / `query`.
+ * - bun:sqlite has no `.open` property — tracked locally so callers can
+ *   still ask the question.
+ * - bun:sqlite's `Statement.run` already returns `{ changes,
+ *   lastInsertRowid }`; we just normalize null/undefined.
+ */
+class BunSqliteAdapter implements SqliteDatabase {
   private _db: any;
+  private _open = true;
 
   constructor(dbPath: string) {
+    // Lazy require so this file is importable under non-Bun runtimes
+    // for type-checking. The module only resolves at runtime in Bun.
     // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const { DatabaseSync } = require('node:sqlite');
-    this._db = new DatabaseSync(dbPath);
+    const { Database } = require('bun:sqlite');
+    this._db = new Database(dbPath, { create: true });
   }
 
   get open(): boolean {
-    return this._db.isOpen;
+    return this._open;
   }
 
   prepare(sql: string): SqliteStatement {
-    // node:sqlite matches better-sqlite3's calling convention (variadic
-    // positional args, or a single object for @named params), so params forward
-    // through unchanged.
-    const stmt = this._db.prepare(sql);
+    const { sql: rewrittenSql, paramOrder } = translateNamedParams(sql);
+    const stmt = this._db.prepare(rewrittenSql);
     return {
       run(...params: any[]) {
-        const r = stmt.run(...params);
+        const resolved = resolveParams(params, paramOrder);
+        const result = stmt.run(...resolved);
         return {
-          changes: Number(r?.changes ?? 0),
-          lastInsertRowid: r?.lastInsertRowid ?? 0,
+          changes: result?.changes ?? 0,
+          lastInsertRowid: result?.lastInsertRowid ?? 0,
         };
       },
       get(...params: any[]) {
-        return stmt.get(...params);
+        const resolved = resolveParams(params, paramOrder);
+        return stmt.get(...resolved);
       },
       all(...params: any[]) {
-        return stmt.all(...params);
+        const resolved = resolveParams(params, paramOrder);
+        return stmt.all(...resolved);
       },
     };
   }
@@ -79,61 +131,39 @@ class NodeSqliteAdapter implements SqliteDatabase {
     this._db.exec(sql);
   }
 
-  pragma(str: string, options?: { simple?: boolean }): any {
+  pragma(str: string, options?: SqlitePragmaOptions): any {
     const trimmed = str.trim();
-    // Write pragma ("key = value"): node:sqlite is real SQLite, so every pragma
-    // (WAL, mmap, synchronous, …) applies as-is.
     if (trimmed.includes('=')) {
+      // Write pragma — `PRAGMA key = value`.
       this._db.exec(`PRAGMA ${trimmed}`);
       return;
     }
-    // Read pragma. Default: the row object (e.g. { journal_mode: 'wal' }).
-    // `{ simple: true }` returns just the single column value, like better-sqlite3.
-    const row = this._db.prepare(`PRAGMA ${trimmed}`).get();
+    // Read pragma — better-sqlite3 returns an array of row objects by
+    // default; with `{ simple: true }` it returns the first column of
+    // the first row (a scalar). Replicate both shapes.
+    const rows = this._db.prepare(`PRAGMA ${trimmed}`).all();
     if (options?.simple) {
-      return row && typeof row === 'object' ? Object.values(row)[0] : row;
+      if (!rows || rows.length === 0) return undefined;
+      const first = rows[0];
+      const keys = Object.keys(first);
+      return keys.length > 0 ? first[keys[0]!] : undefined;
     }
-    return row;
+    return rows;
   }
 
   transaction<T>(fn: (...args: any[]) => T): (...args: any[]) => T {
-    return (...args: any[]) => {
-      this._db.exec('BEGIN');
-      try {
-        const result = fn(...args);
-        this._db.exec('COMMIT');
-        return result;
-      } catch (error) {
-        this._db.exec('ROLLBACK');
-        throw error;
-      }
-    };
+    return this._db.transaction(fn) as (...args: any[]) => T;
   }
 
   close(): void {
-    // node:sqlite's DatabaseSync.close() throws if already closed; make it
-    // idempotent to match better-sqlite3 (callers may close more than once).
-    if (this._db.isOpen) this._db.close();
+    this._db.close();
+    this._open = false;
   }
 }
 
 /**
- * Create a database connection backed by `node:sqlite`.
- *
- * Returns the active backend alongside the db so each `DatabaseConnection` can
- * report it per-instance — MCP can open multiple project DBs in one process, so
- * a process-global would race.
+ * Create a database connection backed by `bun:sqlite`.
  */
-export function createDatabase(dbPath: string): { db: SqliteDatabase; backend: SqliteBackend } {
-  try {
-    return { db: new NodeSqliteAdapter(dbPath), backend: 'node-sqlite' };
-  } catch (error) {
-    const msg = error instanceof Error ? error.message : String(error);
-    throw new Error(
-      'Failed to open SQLite via the built-in node:sqlite module.\n' +
-      'CodeGraph requires node:sqlite (Node.js 22.5+). Install the self-contained\n' +
-      'CodeGraph release (it bundles a compatible Node), or run on Node 22.5+.\n' +
-      `Underlying error: ${msg}`
-    );
-  }
+export function createDatabase(dbPath: string): { db: SqliteDatabase } {
+  return { db: new BunSqliteAdapter(dbPath) };
 }

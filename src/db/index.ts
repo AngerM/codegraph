@@ -4,13 +4,14 @@
  * Handles SQLite database initialization and connection management.
  */
 
-import { SqliteDatabase, SqliteBackend, createDatabase } from './sqlite-adapter';
+import { createDatabase } from './sqlite-adapter';
+import type { SqliteDatabase } from './sqlite-adapter';
 import * as fs from 'fs';
 import * as path from 'path';
 import { SchemaVersion } from '../types';
 import { runMigrations, getCurrentVersion, CURRENT_SCHEMA_VERSION } from './migrations';
 
-export { SqliteDatabase, SqliteBackend } from './sqlite-adapter';
+export type { SqliteDatabase } from './sqlite-adapter';
 
 /**
  * Apply connection-level PRAGMAs. Shared by `initialize` and `open` so the two
@@ -29,7 +30,7 @@ export { SqliteDatabase, SqliteBackend } from './sqlite-adapter';
 function configureConnection(db: SqliteDatabase): void {
   db.pragma('busy_timeout = 5000');      // MUST be first — see above
   db.pragma('foreign_keys = ON');
-  db.pragma('journal_mode = WAL');       // node:sqlite supports WAL on every platform
+  db.pragma('journal_mode = WAL');       // bun:sqlite supports WAL on every platform
   db.pragma('synchronous = NORMAL');     // safe with WAL mode
   db.pragma('cache_size = -64000');      // 64 MB page cache
   db.pragma('temp_store = MEMORY');      // temp tables in memory
@@ -42,12 +43,10 @@ function configureConnection(db: SqliteDatabase): void {
 export class DatabaseConnection {
   private db: SqliteDatabase;
   private dbPath: string;
-  private backend: SqliteBackend;
 
-  private constructor(db: SqliteDatabase, dbPath: string, backend: SqliteBackend) {
+  private constructor(db: SqliteDatabase, dbPath: string) {
     this.db = db;
     this.dbPath = dbPath;
-    this.backend = backend;
   }
 
   /**
@@ -61,7 +60,7 @@ export class DatabaseConnection {
     }
 
     // Create and configure database
-    const { db, backend } = createDatabase(dbPath);
+    const { db } = createDatabase(dbPath);
 
     configureConnection(db);
 
@@ -78,7 +77,7 @@ export class DatabaseConnection {
       ).run(CURRENT_SCHEMA_VERSION, Date.now(), 'Initial schema includes all migrations');
     }
 
-    return new DatabaseConnection(db, dbPath, backend);
+    return new DatabaseConnection(db, dbPath);
   }
 
   /**
@@ -89,12 +88,12 @@ export class DatabaseConnection {
       throw new Error(`Database not found: ${dbPath}`);
     }
 
-    const { db, backend } = createDatabase(dbPath);
+    const { db } = createDatabase(dbPath);
 
     configureConnection(db);
 
     // Check and run migrations if needed
-    const conn = new DatabaseConnection(db, dbPath, backend);
+    const conn = new DatabaseConnection(db, dbPath);
     const currentVersion = getCurrentVersion(db);
 
     if (currentVersion < CURRENT_SCHEMA_VERSION) {
@@ -109,15 +108,6 @@ export class DatabaseConnection {
    */
   getDb(): SqliteDatabase {
     return this.db;
-  }
-
-  /**
-   * Get the SQLite backend serving this connection. Per-instance so
-   * MCP cross-project queries report the right backend even when
-   * multiple project DBs are open in the same process.
-   */
-  getBackend(): SqliteBackend {
-    return this.backend;
   }
 
   /**

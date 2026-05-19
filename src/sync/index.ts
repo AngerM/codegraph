@@ -12,7 +12,8 @@
  * - Incremental reindexing (in extraction module)
  */
 
-export { FileWatcher, WatchOptions } from './watcher';
+export { FileWatcher } from './watcher';
+export type { WatchOptions } from './watcher';
 export { watchDisabledReason, detectWsl } from './watch-policy';
 export {
   installGitSyncHook,

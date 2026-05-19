@@ -8,7 +8,7 @@
 
 [![npm version](https://img.shields.io/npm/v/@colbymchenry/codegraph.svg)](https://www.npmjs.com/package/@colbymchenry/codegraph)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Self-contained](https://img.shields.io/badge/Node.js-bundled%20%C2%B7%20none%20required-brightgreen.svg)](https://nodejs.org/)
+[![Bun](https://img.shields.io/badge/Bun-1.1+-f9f1e1.svg)](https://bun.sh/)
 
 [![Windows](https://img.shields.io/badge/Windows-supported-blue.svg)](#)
 [![macOS](https://img.shields.io/badge/macOS-supported-blue.svg)](#)
@@ -24,24 +24,15 @@
 
 ## Get Started
 
-**No Node.js required** — one command grabs the right build for your OS:
+CodeGraph runs on the [Bun](https://bun.sh) runtime — bun:sqlite is built in, so there's no native module to compile and no slow WASM fallback.
 
 ```bash
-# macOS / Linux
-curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh
-
-# Windows (PowerShell)
-irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex
+bunx @colbymchenry/codegraph
 ```
 
-Already have Node? Use npm instead (works on any version):
+Don't have Bun yet? Install it with `curl -fsSL https://bun.sh/install | bash` (macOS/Linux) or `powershell -c "irm bun.sh/install.ps1 | iex"` (Windows). Bun 1.1+ is required.
 
-```bash
-npx @colbymchenry/codegraph        # zero-install, or:
-npm i -g @colbymchenry/codegraph
-```
-
-<sub>CodeGraph bundles its own runtime — nothing to compile, no native build, works the same everywhere. The interactive installer auto-configures your agent(s) — Claude Code, Cursor, Codex CLI, opencode, Hermes Agent.</sub>
+<sub>The interactive installer auto-configures your agent(s) — Claude Code, Cursor, Codex CLI, opencode, Hermes Agent.</sub>
 
 ### Initialize Projects
 
@@ -167,7 +158,7 @@ CodeGraph detects web-framework routing files and emits `route` nodes linked by 
 ### 1. Run the Installer
 
 ```bash
-npx @colbymchenry/codegraph
+bunx @colbymchenry/codegraph
 ```
 
 The installer will:
@@ -215,7 +206,7 @@ That's it — your agent will use CodeGraph tools automatically when a `.codegra
 
 **Install globally:**
 ```bash
-npm install -g @colbymchenry/codegraph
+bun install -g @colbymchenry/codegraph
 ```
 
 **Add to `~/.claude.json`:**
@@ -380,7 +371,7 @@ codegraph affected src/auth.ts --filter "e2e/*"     # Custom test file pattern
 #!/usr/bin/env bash
 AFFECTED=$(git diff --name-only HEAD | codegraph affected --stdin --quiet)
 if [ -n "$AFFECTED" ]; then
-  npx vitest run $AFFECTED
+  bun test $AFFECTED
 fi
 ```
 
@@ -479,10 +470,9 @@ What that means in practice:
 
 **Indexing is slow** — Check that `node_modules` and other large directories are excluded. Use `--quiet` to reduce output overhead.
 
-**MCP hits `database is locked`** — current builds shouldn't: CodeGraph bundles its own Node runtime and uses Node's built-in `node:sqlite` in WAL mode, where concurrent reads never block on a writer. If you still see it:
+**`bun: command not found`** — CodeGraph runs on the [Bun](https://bun.sh) runtime. Install it with `curl -fsSL https://bun.sh/install | bash` (macOS/Linux) or `powershell -c "irm bun.sh/install.ps1 | iex"` (Windows). Bun 1.1+ is required.
 
-- **You're on an old (pre-0.9) install.** Reinstall to get the bundled runtime — `curl -fsSL https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.sh | sh` (macOS/Linux), `irm https://raw.githubusercontent.com/colbymchenry/codegraph/main/install.ps1 | iex` (Windows), or `npm i -g @colbymchenry/codegraph@latest`.
-- **`codegraph status` shows `Journal:` other than `wal`** — WAL couldn't be enabled on this filesystem (common on network shares and WSL2 `/mnt`), so reads can block on writes. Move the project (with its `.codegraph/` folder) onto a local disk.
+**MCP hits `database is locked`** — bun:sqlite uses WAL mode so this should be rare. If you see it on a network share or WSL2 `/mnt` path, WAL may have failed to enable on that filesystem. Move the project (with its `.codegraph/` folder) onto a local disk.
 
 **MCP server not connecting** — Ensure the project is initialized/indexed, verify the path in your MCP config, and check that `codegraph serve --mcp` works from the command line.
 

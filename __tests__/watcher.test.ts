@@ -88,6 +88,9 @@ describe('FileWatcher', () => {
       const watcher = new FileWatcher(testDir, syncFn, { debounceMs: 200 });
 
       watcher.start();
+      // Let fs.watch settle — Bun's recursive watch needs a brief grace
+      // period before it reliably delivers per-file events.
+      await new Promise((r) => setTimeout(r, 100));
 
       // Create a new file
       fs.writeFileSync(path.join(testDir, 'src', 'new.ts'), 'export const y = 2;');
@@ -178,6 +181,7 @@ describe('FileWatcher', () => {
       });
 
       watcher.start();
+      await new Promise((r) => setTimeout(r, 100));
 
       fs.writeFileSync(path.join(testDir, 'src', 'test.ts'), 'export const z = 3;');
 
@@ -196,6 +200,7 @@ describe('FileWatcher', () => {
       });
 
       watcher.start();
+      await new Promise((r) => setTimeout(r, 100));
 
       fs.writeFileSync(path.join(testDir, 'src', 'test.ts'), 'export const z = 3;');
 
@@ -255,6 +260,7 @@ describe('FileWatcher', () => {
       const initialNodes = initialStats.nodeCount;
 
       cg.watch({ debounceMs: 300 });
+      await new Promise((r) => setTimeout(r, 100));
 
       // Add a new file with a function
       fs.writeFileSync(

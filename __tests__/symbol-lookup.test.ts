@@ -25,8 +25,11 @@ beforeAll(async () => {
 
 function hasSqliteBindings(): boolean {
   try {
-    const { DatabaseSync } = require('node:sqlite');
-    const db = new DatabaseSync(':memory:');
+    // Built into Bun — if we're running under Bun, this always succeeds.
+    // The check still exists so the suite stays runnable under non-Bun
+    // test runners (it skips instead of erroring).
+    const { Database } = require('bun:sqlite');
+    const db = new Database(':memory:');
     db.close();
     return true;
   } catch {

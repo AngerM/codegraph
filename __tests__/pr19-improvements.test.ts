@@ -45,11 +45,11 @@ function cleanupTempDir(dir: string): void {
   }
 }
 
-// Check if the node:sqlite backend is available (Node >= 22.5)
+// Check if SQLite bindings are available (bun:sqlite is built-in under Bun)
 function hasSqliteBindings(): boolean {
   try {
-    const { DatabaseSync } = require('node:sqlite');
-    const db = new DatabaseSync(':memory:');
+    const { Database } = require('bun:sqlite');
+    const db = new Database(':memory:');
     db.close();
     return true;
   } catch {

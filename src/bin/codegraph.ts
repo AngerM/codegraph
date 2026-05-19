@@ -1,4 +1,4 @@
-#!/usr/bin/env node
+#!/usr/bin/env bun
 /**
  * CodeGraph CLI
  *
@@ -26,9 +26,6 @@ import { getCodeGraphDir, isInitialized } from '../directory';
 import { createShimmerProgress } from '../ui/shimmer-progress';
 import { getGlyphs } from '../ui/glyphs';
 
-import { buildNode25BlockBanner, buildNodeTooOldBanner, MIN_NODE_MAJOR } from './node-version-check';
-import { relaunchWithWasmRuntimeFlagsIfNeeded } from '../extraction/wasm-runtime-flags';
-
 // Lazy-load heavy modules (CodeGraph, runInstaller) to keep CLI startup fast.
 async function loadCodeGraph(): Promise<typeof import('../index')> {
   try {
@@ -36,9 +33,9 @@ async function loadCodeGraph(): Promise<typeof import('../index')> {
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`\x1b[31m${getGlyphs().err}\x1b[0m Failed to load CodeGraph modules.`);
-    console.error(`\n  Node: ${process.version}  Platform: ${process.platform} ${process.arch}`);
+    console.error(`\n  Runtime: ${process.versions.bun ? 'bun ' + process.versions.bun : 'node ' + process.version}  Platform: ${process.platform} ${process.arch}`);
     console.error(`\n  Error: ${msg}`);
-    console.error('\n  Try reinstalling with: npm install -g @colbymchenry/codegraph\n');
+    console.error('\n  Try reinstalling with: bun install -g @colbymchenry/codegraph\n');
     process.exit(1);
   }
 }
@@ -48,40 +45,6 @@ async function loadCodeGraph(): Promise<typeof import('../index')> {
 // eslint-disable-next-line @typescript-eslint/no-implied-eval
 const importESM = new Function('specifier', 'return import(specifier)') as
   (specifier: string) => Promise<typeof import('@clack/prompts')>;
-
-// Block CodeGraph on Node.js 25.x — V8's turboshaft WASM JIT has a Zone
-// allocator bug that reliably crashes when compiling tree-sitter
-// grammars (see #54, #81, #140). The previous behaviour was a soft
-// console.warn that scrolls off-screen before the OOM crash 30 seconds
-// later, leading to a steady stream of "what is this OOM" reports.
-// Hard-exit before any WASM work; allow override via env var for users
-// who patched V8 themselves or want to test a future fix.
-const nodeVersion = process.versions.node;
-const nodeMajor = parseInt(nodeVersion.split('.')[0] ?? '0', 10);
-if (nodeMajor >= 25) {
-  process.stderr.write(buildNode25BlockBanner(nodeVersion) + '\n');
-  if (!process.env.CODEGRAPH_ALLOW_UNSAFE_NODE) {
-    process.exit(1);
-  }
-  // Override active — banner shown for visibility, continuing.
-}
-// Enforce the supported Node floor. `engines` in package.json only *warns* on
-// install (unless engine-strict), so hard-block here to actually keep users off
-// unsupported versions. Mirrors the 25+ block above. See package.json `engines`.
-if (nodeMajor < MIN_NODE_MAJOR) {
-  process.stderr.write(buildNodeTooOldBanner(nodeVersion) + '\n');
-  if (!process.env.CODEGRAPH_ALLOW_UNSAFE_NODE) {
-    process.exit(1);
-  }
-  // Override active — banner shown for visibility, continuing.
-}
-
-// Re-exec with V8's `--liftoff-only` if it isn't already set, so tree-sitter's
-// large WASM grammars never hit the turboshaft Zone OOM (`Fatal process out of
-// memory: Zone`) on Node >= 22. No-op under the bundled launcher, which already
-// passes the flag. Must run before any grammar (in the parse worker, which
-// inherits this process's flags) is compiled. See ../extraction/wasm-runtime-flags.
-relaunchWithWasmRuntimeFlagsIfNeeded(__filename);
 
 // Check if running with no arguments - run installer
 if (process.argv.length === 2) {
@@ -707,7 +670,6 @@ program
       const cg = await CodeGraph.open(projectPath);
       const stats = cg.getStats();
       const changes = cg.getChangedFiles();
-      const backend = cg.getBackend();
       const journalMode = cg.getJournalMode();
 
       // JSON output mode
@@ -719,7 +681,6 @@ program
           nodeCount: stats.nodeCount,
           edgeCount: stats.edgeCount,
           dbSizeBytes: stats.dbSizeBytes,
-          backend,
           journalMode,
           nodesByKind: stats.nodesByKind,
           languages: Object.entries(stats.filesByLanguage).filter(([, count]) => count > 0).map(([lang]) => lang),
@@ -745,12 +706,8 @@ program
       console.log(`  Nodes:     ${formatNumber(stats.nodeCount)}`);
       console.log(`  Edges:     ${formatNumber(stats.edgeCount)}`);
       console.log(`  DB Size:   ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`);
-      // Surface the active SQLite backend (node:sqlite — Node's built-in real
-      // SQLite, full WAL + FTS5, no native build).
-      const backendLabel = chalk.green(`node:sqlite ${getGlyphs().dash} built-in (full WAL)`);
-      console.log(`  Backend:   ${backendLabel}`);
       // Effective journal mode: 'wal' means concurrent reads never block on a
-      // writer; anything else means they can ("database is locked"). node:sqlite
+      // writer; anything else means they can ("database is locked"). bun:sqlite
       // supports WAL everywhere, so a non-wal mode means the filesystem can't
       // (network mounts, WSL2 /mnt). See issue #238.
       const journalLabel = journalMode === 'wal'

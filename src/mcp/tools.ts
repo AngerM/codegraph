@@ -1360,12 +1360,8 @@ export class ToolHandler {
       `**Database size:** ${(stats.dbSizeBytes / 1024 / 1024).toFixed(2)} MB`,
     ];
 
-    // Surface the active SQLite backend (node:sqlite, Node's built-in real
-    // SQLite — full WAL + FTS5, no native build).
-    lines.push(`**Backend:** node:sqlite (Node built-in) — full WAL + FTS5`);
-
     // Effective journal mode. 'wal' ⇒ concurrent reads never block on a writer;
-    // anything else ⇒ they can ("database is locked"). node:sqlite supports WAL
+    // anything else ⇒ they can ("database is locked"). bun:sqlite supports WAL
     // everywhere, so a non-wal mode means the filesystem can't (network/
     // virtualized mounts, WSL2 /mnt). See issue #238.
     const journalMode = cg.getJournalMode();
