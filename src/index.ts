@@ -46,7 +46,7 @@ import {
 import { GraphTraverser, GraphQueryManager } from './graph';
 import { ContextBuilder, createContextBuilder } from './context';
 import { Mutex, FileLock } from './utils';
-import { FileWatcher, WatchOptions } from './sync';
+import { FileWatcher, WatchOptions, PendingFile } from './sync';
 
 // Re-export types for consumers
 export * from './types';
@@ -76,7 +76,7 @@ export {
 export type { Logger } from './errors';
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
 export { FileWatcher } from './sync';
-export type { WatchOptions } from './sync';
+export type { WatchOptions, PendingFile } from './sync';
 export { MCPServer } from './mcp';
 
 /**
@@ -328,6 +328,17 @@ export class CodeGraph {
       try {
         const result = await this.orchestrator.indexAll(options.onProgress, options.signal, options.verbose);
 
+        // Re-detect frameworks now that the index is populated. The resolver
+        // is constructed with createResolver() before any files exist, so
+        // framework resolvers whose detect() consults the indexed file list
+        // (e.g. UIKit/SwiftUI scanning for imports, swift-objc-bridge looking
+        // for both Swift and ObjC files) all return false on that initial pass
+        // and silently drop themselves. Re-initializing here gives them a
+        // chance to see the actual project before resolution runs.
+        if (result.success && result.filesIndexed > 0) {
+          this.resolver.initialize();
+        }
+
         // Resolve references to create call/import/extends edges
         if (result.success && result.filesIndexed > 0) {
           // Get count without loading all refs into memory
@@ -346,6 +357,12 @@ export class CodeGraph {
               total,
             });
           });
+        }
+
+        // Refresh planner stats + checkpoint the WAL after bulk writes.
+        // Cheap and non-blocking; never load-bearing for correctness.
+        if (result.success && result.filesIndexed > 0) {
+          this.db.runMaintenance();
         }
 
         return result;
@@ -429,6 +446,11 @@ export class CodeGraph {
           }
         }
 
+        // Refresh planner stats + checkpoint the WAL after bulk writes.
+        if (result.filesAdded > 0 || result.filesModified > 0 || result.filesRemoved > 0) {
+          this.db.runMaintenance();
+        }
+
         return result;
       } finally {
         this.fileLock.release();
@@ -487,6 +509,31 @@ export class CodeGraph {
    */
   isWatching(): boolean {
     return this.watcher?.isActive() ?? false;
+  }
+
+  /**
+   * Files seen by the file watcher since the last successful sync —
+   * the per-file "stale" signal MCP tools attach to responses so an agent
+   * can fall back to {@link Read} for just the affected file without
+   * waiting for a debounced sync to complete (issue #403).
+   *
+   * Returns an empty list when the watcher isn't active, or no events have
+   * arrived. Each entry includes `firstSeenMs` and `lastSeenMs` (wall-clock
+   * `Date.now()` values) so callers can render "edited Nms ago", plus an
+   * `indexing` flag indicating whether the in-flight sync (if any) will
+   * absorb that file.
+   */
+  getPendingFiles(): PendingFile[] {
+    return this.watcher?.getPendingFiles() ?? [];
+  }
+
+  /**
+   * Resolves once the file watcher has finished its initial chokidar scan.
+   * Useful for tests that need a deterministic boundary before asserting on
+   * `getPendingFiles()`. Resolves immediately when no watcher is active.
+   */
+  waitUntilWatcherReady(timeoutMs?: number): Promise<void> {
+    return this.watcher ? this.watcher.waitUntilReady(timeoutMs) : Promise.resolve();
   }
 
   /**

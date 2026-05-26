@@ -7,6 +7,325 @@ a [GitHub Release](https://github.com/colbymchenry/codegraph/releases) tagged
 This project follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+- **Installer targets for Gemini CLI and the Antigravity IDE.** `codegraph install` (and the interactive prompt) now detect and configure two more agents out of the box:
+  - **Gemini CLI** (also covers the rebranded Antigravity CLI) — writes `mcpServers.codegraph` to `~/.gemini/settings.json` (global) or `./.gemini/settings.json` (local), and the codegraph usage block into `~/.gemini/GEMINI.md` / `./GEMINI.md`. Existing top-level settings (e.g. `security.auth`) and sibling MCP servers are preserved.
+  - **Antigravity IDE** — writes `mcpServers.codegraph` to Antigravity's unified MCP config at `~/.gemini/config/mcp_config.json` (post-migration, signalled by the `.migrated` marker Antigravity itself drops). Falls back to the legacy `~/.gemini/antigravity/mcp_config.json` for users on a pre-migration Antigravity build. On install, a stale codegraph entry in the legacy path is migrated to the new file automatically. Uninstall sweeps both. Antigravity-managed sibling fields (e.g. the `"disabled": true` flag the IDE adds when a user disables a server through the UI) are preserved across re-installs.
+  - The Antigravity entry omits the `type: "stdio"` field the other targets use — Antigravity rejects entries that carry it.
+  - On macOS, the Antigravity entry resolves `codegraph` to its absolute path at install time (e.g. an nvm-managed `~/.nvm/.../bin/codegraph`). macOS GUI apps launched from Dock/Finder get a stripped PATH that doesn't include nvm, so a bare command name fails to spawn — even when `which codegraph` works in your shell. Linux GUI apps inherit user PATH and Windows uses env `PATH` directly, so both keep the bare command.
+  - The IDE shares `GEMINI.md` with Gemini CLI, so the two targets compose naturally when both are installed; the antigravity target deliberately doesn't touch `GEMINI.md` so uninstalling Antigravity alone leaves CLI instructions intact.
+
+  Both targets are tested on the same parameterized contract as the existing five agents (idempotent install, sibling preservation, install/uninstall round-trip), with extra coverage for migration-marker detection, legacy → unified entry migration, sibling `disabled` field preservation, and the cross-target case where Gemini CLI and Antigravity IDE coexist in the same `~/.gemini/`. Closes #399.
+
+## [0.9.5] - 2026-05-25
+
+### Added
+- **Shared MCP daemon — running multiple AI agents in the same project no
+  longer multiplies the file-watch, SQLite, and indexing cost.** Point more
+  than one `codegraph serve --mcp` at a project (two Claude Code windows, an
+  agent in a git worktree, `/loop` alongside an interactive session, parallel
+  sub-agents) and they now share **one** background daemon per project: a
+  single file watcher (one inotify set on Linux), one SQLite connection, and
+  one tree-sitter warm-up — instead of N independent copies. Measured on Linux:
+  three agents register **~3× fewer inotify watches** sharing one watcher
+  versus three standalone servers. Resolves issue #411. (Composable with the
+  per-watcher pruning in #276/#346 — that shrinks each watch set; this shares
+  one across agents.)
+- The daemon runs as a **detached background process** that outlives any single
+  session, so closing one editor or terminal never severs the others. Each
+  `serve --mcp` your agent host launches is a thin stdio↔socket proxy to it (a
+  Unix-domain socket, or a named pipe on Windows). When the last client
+  disconnects the daemon lingers for `CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS`
+  (default `300000`) so back-to-back sessions skip the startup cost, then exits
+  and removes its lockfile — an OOM-killed or force-quit host can't leak it.
+- **`CODEGRAPH_NO_DAEMON=1`** opts out, restoring one independent server per
+  client (handy for debugging or sandboxes that disallow local IPC sockets).
+  The daemon is also version-pinned: after you upgrade codegraph, sessions
+  already attached to the old daemon keep using it while new sessions run
+  standalone until it idles out — they never mix versions over the socket.
+
+- **Per-file staleness banner — codegraph responses now tell the agent which
+  files are pending re-index (#403).** When the file watcher has seen edits
+  since the last successful sync, MCP tool responses (`codegraph_search`,
+  `context`, `callers`, `callees`, `impact`, `trace`, `explore`, `node`,
+  `files`) prepend a `⚠️` banner naming the stale files referenced in that
+  response, with their edit age and indexing state; pending files elsewhere in
+  the project appear as a small footer. The agent is told which specific files
+  to Read directly; the rest of the response is fresh and codegraph stays
+  authoritative for it. No artificial wait, no static "wait ~500ms" guess —
+  the cost is zero when nothing's pending. `codegraph_status` also surfaces a
+  `### Pending sync:` section so an agent can ask "is the index caught up?" in
+  one call.
+- **`CODEGRAPH_WATCH_DEBOUNCE_MS` env var lets you tune the file-watcher quiet
+  window (#403).** Default stays at 2000ms; workspaces with bursty writes
+  (formatter-on-save chains, multi-file refactors, large generated outputs)
+  can raise it (e.g. `5000` or `10000`) without touching their agent's command
+  line. Clamped to `[100ms, 60s]`; out-of-range or non-numeric values fall
+  back to the default and the active value is logged to stderr on watcher
+  startup so it's discoverable. Pairs with the staleness banner above: the
+  banner stays accurate at any debounce value because it's per-file, not a
+  static "wait N ms" instruction.
+
+- **Objective-C indexing — `.m`, `.mm`, and content-sniffed `.h` files now
+  parse with full structural extraction (#165).** Adds a tree-sitter-objc
+  extractor that produces `class` nodes for `@interface` / `@implementation`
+  (deduplicated into one), `protocol` nodes for `@protocol`, methods with
+  **full multi-part selectors** (`setObject:forKey:`, `tableView:didSelectRowAtIndexPath:`
+  — not just the first keyword, which would collide distinct methods),
+  `+`/`-` static distinction, `@property` declarations, `#import` for both
+  `<system>` and `"local"` forms, and `extends` / `implements` edges for
+  superclasses and `<Protocol>` conformance lists. Call edges come from
+  both C-style `call_expression` and ObjC `message_expression` (with
+  `self`/`super` skipped on qualified callee names). Header files default
+  to C unless content-sniffing finds `@interface`/`@implementation`/
+  `@protocol`/`@synthesize`, so iOS headers classify correctly without
+  breaking pure-C projects. Validated on AFNetworking (84 files, 100% file
+  coverage, 93 multi-keyword selectors), RestKit (282 files, 99.6%), and
+  Texture (926 files, 100% — including heavy `.mm` ObjC++ content).
+
+  Disclosed limitations: categories produce one extra class node per
+  category file (e.g. `ASDisplayNode+Yoga.m` creates a second `ASDisplayNode`
+  node attributed to the category file); chained/nested message sends record
+  only the innermost method; `[Class alloc]` patterns don't yet emit
+  `instantiates` edges; `@protocol Foo <Bar>` refinement lists aren't wired
+  to `implements`; heavy C++ in `.mm` files may parse incompletely under the
+  ObjC grammar. Mixed Swift/Objective-C cross-language resolution
+  (`@objc`-exposed Swift methods, bridging headers, React Native's native
+  bridge) is **not** in scope for this entry — that's a separate effort
+  tracked under the dynamic-dispatch coverage playbook.
+
+- **Mixed iOS, React Native, and Expo cross-language bridging.** Real iOS
+  and React Native codebases live across multiple languages — a Swift caller
+  invokes an Objective-C selector that's been auto-bridged, JS calls into a
+  native module via the React Native bridge, JSX delegates to a native view
+  manager. Static tree-sitter extraction stops at each boundary. CodeGraph
+  now bridges them so `trace` / `callers` / `callees` / `impact` connect
+  end-to-end across the gap. Closes the iOS/RN parts of the request thread
+  for #401. Bridges added:
+
+  - **Swift ↔ Objective-C.** Swift `@objc` auto-bridging rules
+    (`func play(song:)` ↔ ObjC `-playWithSong:`, `init(name:, age:)` ↔
+    `-initWithName:age:`, `var x: T` ↔ `-x`/`-setX:`, `@objc(custom:)`
+    overrides) plus the Cocoa preposition-prefix forms that reverse-import
+    natively (`objectForKey:`, `stringWithFormat:`, etc.). Validated on
+    Charts (28 / 1 bridge edges objc→swift / swift→objc), realm-swift
+    (36 / 1185), wikipedia-ios (52 / 983). The high-confidence direction
+    is ObjC→Swift, since Swift callsites carry the bare method name only
+    and many overlap with Cocoa built-ins.
+
+  - **React Native legacy bridge + TurboModules.** Parses
+    `RCT_EXPORT_MODULE` / `RCT_EXPORT_METHOD` / `RCT_REMAP_METHOD` (ObjC
+    & ObjC++) and `@ReactMethod` (Java/Kotlin) declarations; treats
+    `Native<X>.ts` TurboModule spec files as ground truth. A JS callsite
+    of `NativeModules.X.fn(...)` or `import X from './NativeX'; X.fn(...)`
+    resolves to the matching native method. Validated on AsyncStorage
+    (8/8 precise), react-native-svg (9 TurboModule bridges to Java),
+    react-native-firebase (18 precise after `RCTEventEmitter` built-in
+    blocklist).
+
+  - **Native → JS event channel.** Synthesizes cross-language edges
+    keyed by literal event name: ObjC `sendEventWithName:@"X"` /
+    Swift `sendEvent(withName: "X", ...)` / Java/Kotlin `.emit("X", ...)`
+    → JS `new NativeEventEmitter(...).addListener("X", handler)`.
+    Falls back to attributing the JS endpoint to an enclosing
+    `constant`/`variable` for the very common
+    `const Foo = { watchX(listener) { ... addListener('X', listener) } }`
+    wrapper-API pattern. Validated on RNFirebase (3 push-notification
+    flow edges) and RNGeolocation (2 location-event edges).
+
+  - **Expo Modules.** Parses Swift/Kotlin Expo DSL —
+    `Module { Name("X"); Function("y") { ... }; AsyncFunction("z") { ... };
+    Property("w") { ... } }` — and synthesizes `method` nodes named after
+    each declaration. JS callsites of `requireNativeModule('X').y(...)`
+    then resolve via existing name-match. Validated on expo-haptics
+    (6 method nodes across Swift + Kotlin), expo-camera (41 covering the
+    full SDK surface), and a 7-package Expo sweep (134 method nodes).
+
+  - **Fabric / Codegen + legacy Paper view components.** Parses TS
+    `codegenNativeComponent<NativeProps>('Name', ...)` Codegen specs AND
+    legacy `RCT_EXPORT_VIEW_PROPERTY` / `@ReactProp` view-manager
+    macros. Emits a `component` node per declaration and a `property`
+    node per declared prop, then a synthesizer links the component to
+    its native impl class by convention-based name+suffix
+    (`View`/`ComponentView`/`Manager`/`ViewManager`). The existing JSX
+    synthesizer then connects consumer JSX `<MyView/>` → component →
+    native class. Validated on react-native-segmented-control
+    (legacy Paper — 1 component, 11 props, 4 bridges),
+    react-native-screens (Codegen Fabric — 27 components, 272 props,
+    68 bridges), and react-native-skia (hybrid, monorepo — 5 components,
+    14 props, 15 bridges across Codegen TS specs + Android Java
+    ViewManagers + iOS ObjC).
+
+  Each bridge emits `provenance:'heuristic'` edges with a stable
+  `metadata.synthesizedBy:` channel name (`swift-objc-bridge`,
+  `react-native-bridge`, `rn-event-channel`, `fabric-native-impl`,
+  `expo-modules`) so an agent can tell at a glance how a cross-language
+  hop got into the graph. Per-bridge precision blocklists prevent
+  noisy over-linking on generic Cocoa names (`init`, `description`,
+  `count`, …) and RN event-emitter built-ins (`addListener`, `remove`,
+  …) that every NSObject / RCTEventEmitter subclass exposes.
+
+  Architectural fix surfaced during validation: the resolver's
+  `initialize()` runs at CodeGraph construction (before any files are
+  indexed), so framework resolvers whose `detect()` consults the
+  indexed file list silently dropped themselves. `indexAll()` now
+  re-initializes the resolver after extraction so all frameworks see
+  the populated index — a pre-existing latent bug that also affected
+  the UIKit and SwiftUI resolvers.
+
+  Out of scope for this round: bare JSI (non-TurboModule), dynamic
+  bridge keys (`NativeModules[someVar]`), Android-Java extraction
+  improvements beyond name-match (we use whatever the existing Java
+  extractor produces). Anti-goals documented in
+  `docs/design/mixed-ios-and-react-native-bridging.md`.
+
+### Fixed
+- **Git worktrees no longer silently borrow another tree's index (#155).**
+  When a worktree is nested inside the main checkout — exactly what agent
+  tools that place worktrees under gitignored paths like
+  `.claude/worktrees/<name>/` do — running CodeGraph from that worktree used
+  to walk *up* to the main checkout's `.codegraph/` and silently return that
+  tree's code (usually a different branch). Symbols changed only in the
+  worktree were invisible and nothing told you. Now `codegraph status` (CLI +
+  MCP) calls out the conflict explicitly, and every MCP read tool
+  (`codegraph_search`/`context`/`trace`/`callers`/`callees`/`impact`/
+  `explore`/`node`/`files`) prefixes a one-line notice naming the borrowed
+  index and the fix (`codegraph init -i` in the worktree). Detection is
+  best-effort (no git / not a repo / monorepo subdir → no warning) and runs
+  once per session per start path, so it never costs more than a single pair
+  of `git rev-parse` invocations.
+- **The file watcher no longer exhausts the OS file-watch budget on large
+  repos (#276).** It used to register a recursive watch over the *entire*
+  project — `node_modules/`, build output, caches and all — and filter only
+  after the fact. On Linux that meant hundreds of thousands of inotify watches
+  per project; enough that a second project, or codegraph alongside your editor
+  / `next dev`, could hit the per-user ceiling and fail with "OS file watch
+  limit reached." The watcher now excludes the same directories the indexer
+  ignores (the built-in default-ignore set **plus** your `.gitignore`) *before*
+  registering a watch — so on a repo with a 900-directory `node_modules` the
+  watch count drops from ~1,200 to ~14, even when the project has no
+  `.gitignore`. (Stacks with the shared daemon from #411: one watcher across
+  agents, and now that watcher is small.)
+- **The index now stays in sync after `git pull`, branch switches, and edits made
+  outside your editor.** Incremental sync detected changes via `git status`, which
+  only sees *uncommitted* edits — so code pulled or checked out (which leaves a
+  clean working tree) was silently missed until a full `codegraph index -f`.
+  Change detection is now filesystem-based and git-independent: a `(size, mtime)`
+  stat pre-filter skips unchanged files, then a content hash confirms the rest. It
+  reconciles committed changes from `pull`/`checkout`/`merge`/`rebase`, plain edits
+  in non-git projects, and deletions alike.
+- **The MCP server catches up on connect.** When your editor connects, codegraph
+  reconciles anything that changed while it wasn't running (e.g. a `git pull` from
+  the terminal), so the first query reflects the current code instead of a stale
+  snapshot — rather than waiting for the next live edit.
+- **Dependency, build, and cache directories are now excluded by default** —
+  `node_modules`, `vendor`, `dist`, `build`, `target`, `.venv`, `__pycache__`,
+  `Pods`, `.next`, and the like across every supported language/framework — so
+  `context` and `search` reflect your code instead of third-party noise, even in a
+  project with no `.gitignore` (#407). The defaults apply uniformly, including to
+  committed files (vendoring a dependency into the repo doesn't make it project
+  code). To index one anyway, add a `.gitignore` negation (e.g. `!vendor/`).
+  First-party-prone names like `packages/`, `lib/`, `app/`, and `src/` are never on
+  the default list.
+
+## [0.9.4] - 2026-05-24
+
+### Added
+- **Framework-aware route resolution — `request → route → handler → service`
+  flows now resolve end-to-end across the supported stacks.** Added or fixed
+  routing for Express (inline arrow handlers → services), Rails, Spring (Java +
+  Kotlin; bare and class-prefixed mappings), Django/DRF (`router.register` →
+  ViewSet), Laravel (`Controller@method`), Flask/FastAPI (decorator stacks,
+  empty-path routers, Flask-RESTful `add_resource`), Gin/chi (group-var routing),
+  ASP.NET (feature-folder + bare attribute routes), Drupal, Rust (Axum chained
+  methods, actix builder API), Vapor (Swift grouped routes), Play (`conf/routes`),
+  Vue/Nuxt SFC templates, Svelte/SvelteKit, and React Router (`<Route>` JSX +
+  object data-router).
+- **Dynamic-dispatch flow synthesis — `codegraph_trace`, `codegraph_callees`, and
+  `codegraph_explore` now follow flows that have no static call edge.** Bridged
+  channels: callback/observer registration, EventEmitter (`on`/`emit`), React
+  re-render (`setState` → `render`) and JSX children, Flutter `setState` → `build`,
+  C++ virtual overrides, and Java/Kotlin interface → implementation dispatch
+  (e.g. Spring `@Autowired svc.list()` → the impl). Each synthesized hop is
+  labeled inline in `trace` with where it was wired up.
+- **`CODEGRAPH_MCP_TOOLS` — trim the exposed MCP tool surface.** Set it to a
+  comma-separated list of tool names (e.g. `trace,search,node,context`) to expose
+  only those codegraph tools over MCP; unset exposes all of them. Names match on
+  the short form, so `trace` and `codegraph_trace` are equivalent. Lets you
+  constrain an agent to a minimal surface (or A/B-test tool selection) without
+  editing the client's MCP config. Inert by default.
+- **Release archives now ship with a `SHA256SUMS` file**, and the npm launcher
+  verifies the bundle it downloads against it — a mismatch aborts before anything
+  runs. Releases published before this change have no checksum file, so the
+  verification is skipped (not failed) when none is available.
+
+### Changed
+- **`codegraph_trace` now returns a self-contained flow dossier.** Each hop on
+  the path is shown with its full body inline (previously just the call-site
+  line), and the destination's own outgoing calls are appended — so one trace
+  call usually answers a "how does X reach Y" flow question without a follow-up
+  `codegraph_explore`/`codegraph_node`/Read. Measured across real repos: fewer
+  tool calls and lower cost than the prior path-only output, with no wall-clock
+  regression.
+- **`codegraph_node` and `codegraph_trace` now emit line-numbered source**
+  (`cat -n` style, matching `codegraph_explore` and Read), so an agent can cite
+  or edit exact lines without re-reading the file just to recover line numbers.
+- **`codegraph_explore` now leads with the execution flow** when its query names
+  the symbols of a flow. Agents call `explore` far more than `trace`, passing a
+  bag of symbol names that usually spans the flow they're investigating
+  (`PmsProductController getList PmsProductService list PmsProductServiceImpl`);
+  `explore` now finds the call path *among those named symbols* — riding
+  synthesized dynamic-dispatch edges (callback / React re-render / JSX child /
+  interface→impl) — and shows it first. So a flow question answered through
+  `explore` gets the trace-quality path without the agent having to switch tools.
+  Scoped to the named symbols (no wrong-feature wandering) and bridge-capped (no
+  god-function fan-out); absent when the query is fuzzy or has no connected chain.
+
+### Fixed
+- **Static-extraction & resolution correctness fixes** underpinning the framework
+  work above: C++ inheritance (`base_class_clause` was unhandled, so C++ `extends`
+  edges were missing), Dart method body ranges (methods were extracted
+  signature-only), a Python builtin-name handler guard (handlers named
+  `index`/`get`/`update` were silently dropped), and an explore output-budget
+  regression that under-returned source on god-file repos.
+- **Orphaned `codegraph serve --mcp` processes after a parent SIGKILL.** When
+  the MCP host (Claude Code, opencode, …) was force-killed — OOM killer, a
+  `kill -9`, a container teardown — the child kept running indefinitely on
+  Linux, holding inotify watches, file descriptors, and the SQLite WAL. The
+  kernel doesn't propagate parent death to children, and the stdin
+  `end`/`close` handlers we relied on don't always fire. The MCP server now
+  polls `process.ppid` and shuts down the moment it changes from the value
+  observed at startup; the poll interval is `CODEGRAPH_PPID_POLL_MS` (default
+  `5000`, `0` disables). Resolves
+  [#277](https://github.com/colbymchenry/codegraph/issues/277).
+
+- **`codegraph: no prebuilt bundle for <platform>` after installing through a
+  registry mirror.** Installing `@colbymchenry/codegraph` from a registry that
+  hadn't mirrored the matching per-platform package — most often the
+  npmmirror/cnpm mirrors, but any lazily-syncing mirror or corporate proxy can
+  do it — left every command failing with `no prebuilt bundle for <platform>`.
+  The runtime ships as a per-platform `optionalDependency`, and npm treats an
+  optional package it can't fetch as a success and silently skips it, so the
+  bundle simply went missing. The launcher now self-heals: when the platform
+  bundle isn't installed, it downloads the same archive from GitHub Releases
+  (cached under `~/.codegraph/bundles/` for next time) and runs that — so a
+  global install works even on a mirror that never carried the platform package.
+  Set `CODEGRAPH_NO_DOWNLOAD=1` to disable the network fallback, or
+  `CODEGRAPH_DOWNLOAD_BASE=<url>` to point it at your own mirror of the release
+  archives; the standalone `install.sh` remains the no-Node alternative. Resolves
+  [#303](https://github.com/colbymchenry/codegraph/issues/303).
+- **`install.sh` failing with `403` / "could not resolve latest version" on
+  shared or cloud hosts.** The standalone installer resolved the latest release
+  through the GitHub API, whose unauthenticated limit is 60 requests/hour per IP
+  — routinely exhausted on cloud devboxes and CI where many users share an
+  address, returning `403` (issue #325). It now resolves the version from the
+  `releases/latest` web redirect, which isn't rate-limited (and still falls back
+  to the API). `CODEGRAPH_VERSION` also accepts a bare `0.9.4` in addition to
+  `v0.9.4`. Resolves
+  [#325](https://github.com/colbymchenry/codegraph/issues/325).
+
 ## [0.9.3] - 2026-05-22
 
 ### Added
@@ -132,6 +451,8 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   find its bundle. The release pipeline now verifies every package reached the
   registry (and is idempotent), so a release can't pass green-but-broken again.
 
+[0.9.5]: https://github.com/colbymchenry/codegraph/releases/tag/v0.9.5
+[0.9.4]: https://github.com/colbymchenry/codegraph/releases/tag/v0.9.4
 [0.9.3]: https://github.com/colbymchenry/codegraph/releases/tag/v0.9.3
 [0.9.2]: https://github.com/colbymchenry/codegraph/releases/tag/v0.9.2
 [0.9.1]: https://github.com/colbymchenry/codegraph/releases/tag/v0.9.1

@@ -37,6 +37,7 @@ const WASM_GRAMMAR_FILES: Record<GrammarLanguage, string> = {
   scala: 'tree-sitter-scala.wasm',
   lua: 'tree-sitter-lua.wasm',
   luau: 'tree-sitter-luau.wasm',
+  objc: 'tree-sitter-objc.wasm',
 };
 
 /**
@@ -92,6 +93,8 @@ export const EXTENSION_MAP: Record<string, Language> = {
   '.sc': 'scala',
   '.lua': 'lua',
   '.luau': 'luau',
+  '.m': 'objc',
+  '.mm': 'objc',
 };
 
 /**
@@ -100,9 +103,23 @@ export const EXTENSION_MAP: Record<string, Language> = {
  * from EXTENSION_MAP so parser support and indexing selection never drift.
  */
 export function isSourceFile(filePath: string): boolean {
+  if (isPlayRoutesFile(filePath)) return true; // Play `conf/routes` is extensionless
   const dot = filePath.lastIndexOf('.');
   if (dot < 0) return false;
   return filePath.slice(dot).toLowerCase() in EXTENSION_MAP;
+}
+
+/**
+ * Play Framework routes file: the extensionless `conf/routes` (and included
+ * `conf/*.routes`). No grammar — route extraction is done by the Play framework
+ * resolver, so it's processed through the no-grammar (`yaml`-style) path.
+ */
+export function isPlayRoutesFile(filePath: string): boolean {
+  return (
+    filePath === 'conf/routes' ||
+    filePath.endsWith('/conf/routes') ||
+    filePath.endsWith('.routes')
+  );
 }
 
 /**
@@ -208,12 +225,16 @@ export function getParser(language: Language): Parser | null {
  * Detect language from file extension
  */
 export function detectLanguage(filePath: string, source?: string): Language {
+  // Play `conf/routes` has no grammar — route through the no-symbol path; the
+  // Play framework resolver extracts route nodes from it.
+  if (isPlayRoutesFile(filePath)) return 'yaml';
   const ext = filePath.substring(filePath.lastIndexOf('.')).toLowerCase();
   const lang = EXTENSION_MAP[ext] || 'unknown';
 
-  // .h files could be C or C++ — check source content for C++ features
+  // .h files could be C, C++, or Objective-C — check source content
   if (lang === 'c' && ext === '.h' && source) {
     if (looksLikeCpp(source)) return 'cpp';
+    if (looksLikeObjc(source)) return 'objc';
   }
 
   return lang;
@@ -226,6 +247,14 @@ export function detectLanguage(filePath: string, source?: string): Language {
 function looksLikeCpp(source: string): boolean {
   const sample = source.substring(0, 8192);
   return /\bnamespace\b|\bclass\s+\w+\s*[:{]|\btemplate\s*<|\b(?:public|private|protected)\s*:|\bvirtual\b|\busing\s+(?:namespace\b|\w+\s*=)/.test(sample);
+}
+
+/**
+ * Heuristic: does a .h file contain Objective-C constructs?
+ */
+function looksLikeObjc(source: string): boolean {
+  const sample = source.substring(0, 8192);
+  return /@(?:interface|implementation|protocol|synthesize)\b/.test(sample);
 }
 
 /**
@@ -325,6 +354,7 @@ export function getLanguageDisplayName(language: Language): string {
     scala: 'Scala',
     lua: 'Lua',
     luau: 'Luau',
+    objc: 'Objective-C',
     yaml: 'YAML',
     twig: 'Twig',
     unknown: 'Unknown',
