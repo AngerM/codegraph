@@ -390,6 +390,84 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(body).not.toContain('codegraph_callers');
   });
 
+  it('kiro: install writes settings/mcp.json (mcpServers.codegraph) and steering/codegraph.md', () => {
+    const kiro = getTarget('kiro')!;
+    const result = kiro.install('global', { autoAllow: true });
+    const mcp = path.join(tmpHome, '.kiro', 'settings', 'mcp.json');
+    const steering = path.join(tmpHome, '.kiro', 'steering', 'codegraph.md');
+    expect(result.files.some((f) => f.path === mcp)).toBe(true);
+    expect(result.files.some((f) => f.path === steering)).toBe(true);
+
+    const cfg = JSON.parse(fs.readFileSync(mcp, 'utf-8'));
+    expect(cfg.mcpServers.codegraph).toEqual({ type: 'stdio', command: 'codegraph', args: ['serve', '--mcp'] });
+
+    const md = fs.readFileSync(steering, 'utf-8');
+    expect(md).toContain('codegraph_callers');
+    expect(md).toContain('CodeGraph MCP server');
+  });
+
+  it('kiro: install preserves a pre-existing sibling MCP server in mcp.json', () => {
+    const kiro = getTarget('kiro')!;
+    const mcp = path.join(tmpHome, '.kiro', 'settings', 'mcp.json');
+    fs.mkdirSync(path.dirname(mcp), { recursive: true });
+    fs.writeFileSync(mcp, JSON.stringify({
+      mcpServers: { other: { command: 'uvx', args: ['other-server'] } },
+    }, null, 2) + '\n');
+
+    kiro.install('global', { autoAllow: true });
+
+    const after = JSON.parse(fs.readFileSync(mcp, 'utf-8'));
+    expect(after.mcpServers.other).toBeDefined();
+    expect(after.mcpServers.codegraph).toBeDefined();
+  });
+
+  it('kiro: uninstall strips codegraph but leaves sibling MCP servers intact', () => {
+    const kiro = getTarget('kiro')!;
+    const mcp = path.join(tmpHome, '.kiro', 'settings', 'mcp.json');
+    fs.mkdirSync(path.dirname(mcp), { recursive: true });
+    fs.writeFileSync(mcp, JSON.stringify({
+      mcpServers: { other: { command: 'uvx', args: ['other-server'] } },
+    }, null, 2) + '\n');
+
+    kiro.install('global', { autoAllow: true });
+    kiro.uninstall('global');
+
+    const after = JSON.parse(fs.readFileSync(mcp, 'utf-8'));
+    expect(after.mcpServers.other).toBeDefined();
+    expect(after.mcpServers.codegraph).toBeUndefined();
+  });
+
+  it('kiro: uninstall removes the steering codegraph.md file outright', () => {
+    const kiro = getTarget('kiro')!;
+    kiro.install('global', { autoAllow: true });
+    const steering = path.join(tmpHome, '.kiro', 'steering', 'codegraph.md');
+    expect(fs.existsSync(steering)).toBe(true);
+
+    kiro.uninstall('global');
+    expect(fs.existsSync(steering)).toBe(false);
+  });
+
+  it('kiro: uninstall leaves a sibling steering file (product.md) untouched', () => {
+    const kiro = getTarget('kiro')!;
+    const sibling = path.join(tmpHome, '.kiro', 'steering', 'product.md');
+    fs.mkdirSync(path.dirname(sibling), { recursive: true });
+    fs.writeFileSync(sibling, '# Product\n\nMy team practices.\n');
+
+    kiro.install('global', { autoAllow: true });
+    kiro.uninstall('global');
+
+    expect(fs.existsSync(sibling)).toBe(true);
+    expect(fs.readFileSync(sibling, 'utf-8')).toContain('My team practices.');
+  });
+
+  it('kiro: local install writes ./.kiro/settings/mcp.json and ./.kiro/steering/codegraph.md', () => {
+    const kiro = getTarget('kiro')!;
+    const result = kiro.install('local', { autoAllow: true });
+    const paths = result.files.map((f) => f.path.replace(/\\/g, '/'));
+    expect(paths.some((p) => p.endsWith('/.kiro/settings/mcp.json'))).toBe(true);
+    expect(paths.some((p) => p.endsWith('/.kiro/steering/codegraph.md'))).toBe(true);
+  });
+
   it('antigravity: install writes to LEGACY ~/.gemini/antigravity/mcp_config.json when no migration marker', () => {
     const antigravity = getTarget('antigravity')!;
     antigravity.install('global', { autoAllow: true });
@@ -633,6 +711,86 @@ describe('Installer targets — partial-state idempotency', () => {
     expect(body).not.toContain('codegraph:');
     expect(body).not.toContain('mcp-codegraph');
     expect(body).toContain('custom:\n  keep: true');
+  });
+
+  // Regression for #456: PyYAML's default block style writes list items at the
+  // SAME indent as the parent key (`cli:` and its `- hermes-cli` are both at
+  // indent 2). The pre-fix line-based patcher mistook that first list item for
+  // the next sibling key, truncated the cli block, and spliced `- mcp-codegraph`
+  // at indent 4 BEFORE the existing items — producing unparseable YAML.
+  it('hermes: install preserves PyYAML-default list-at-same-indent style (issue #456)', () => {
+    const hermes = getTarget('hermes')!;
+    const config = path.join(tmpHome, '.hermes', 'config.yaml');
+    fs.mkdirSync(path.dirname(config), { recursive: true });
+    const original = [
+      'model:',
+      '  default: gpt-4o',
+      'platform_toolsets:',
+      '  cli:',
+      '  - hermes-cli',
+      '  - browser',
+      '  - clarify',
+      '  - terminal',
+      '  - web',
+      '  telegram:',
+      '  - hermes-telegram',
+      '  discord:',
+      '  - hermes-discord',
+      '',
+    ].join('\n');
+    fs.writeFileSync(config, original);
+
+    hermes.install('global', { autoAllow: true });
+    const body = fs.readFileSync(config, 'utf-8');
+
+    // mcp-codegraph appended at the same 2-space indent as existing items
+    expect(body).toContain('\n  - mcp-codegraph\n');
+    // hermes-cli preserved
+    expect(body).toContain('\n  - hermes-cli\n');
+    // Sibling sections kept their indent — `telegram:` is still a key under
+    // platform_toolsets, not promoted up.
+    expect(body).toContain('\n  telegram:\n  - hermes-telegram\n');
+    expect(body).toContain('\n  discord:\n  - hermes-discord\n');
+    // No list items leaked to the platform_toolsets level (indent 0).
+    expect(body).not.toMatch(/^- browser/m);
+    expect(body).not.toMatch(/^- hermes-telegram/m);
+
+    // The whole platform_toolsets block extracted by line search should
+    // start with `cli:` and not contain a stray 4-space `mcp-codegraph`
+    // appearing before the rest of the existing items.
+    expect(body).toContain('  cli:\n  - hermes-cli\n  - browser');
+
+    // Idempotent
+    const second = hermes.install('global', { autoAllow: true });
+    expect(second.files[0]?.action).toBe('unchanged');
+  });
+
+  it('hermes: uninstall reverses the install on a PyYAML-default config', () => {
+    const hermes = getTarget('hermes')!;
+    const config = path.join(tmpHome, '.hermes', 'config.yaml');
+    fs.mkdirSync(path.dirname(config), { recursive: true });
+    const original = [
+      'platform_toolsets:',
+      '  cli:',
+      '  - hermes-cli',
+      '  - browser',
+      '  telegram:',
+      '  - hermes-telegram',
+      '',
+    ].join('\n');
+    fs.writeFileSync(config, original);
+
+    hermes.install('global', { autoAllow: true });
+    const installed = fs.readFileSync(config, 'utf-8');
+    expect(installed).toContain('- mcp-codegraph');
+    expect(installed).toContain('codegraph:');
+
+    hermes.uninstall('global');
+    const body = fs.readFileSync(config, 'utf-8');
+    expect(body).not.toContain('mcp-codegraph');
+    expect(body).not.toContain('command: codegraph');
+    expect(body).toContain('  cli:\n  - hermes-cli\n  - browser');
+    expect(body).toContain('  telegram:\n  - hermes-telegram');
   });
 
   it('opencode: uninstall removes only mcp.codegraph, preserves comments and siblings', () => {
@@ -890,6 +1048,7 @@ describe('Installer targets — registry', () => {
     expect(getTarget('hermes')?.id).toBe('hermes');
     expect(getTarget('gemini')?.id).toBe('gemini');
     expect(getTarget('antigravity')?.id).toBe('antigravity');
+    expect(getTarget('kiro')?.id).toBe('kiro');
     expect(getTarget('not-a-real-target')).toBeUndefined();
   });
 
