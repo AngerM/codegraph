@@ -75,8 +75,8 @@ export {
 } from './errors';
 export type { Logger } from './errors';
 export { Mutex, FileLock, processInBatches, debounce, throttle, MemoryMonitor } from './utils';
-export { FileWatcher } from './sync';
-export type { WatchOptions, PendingFile, LockUnavailableError } from './sync';
+export { FileWatcher, LockUnavailableError } from './sync';
+export type { WatchOptions, PendingFile } from './sync';
 export { MCPServer } from './mcp';
 
 /**
