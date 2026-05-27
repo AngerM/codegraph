@@ -19,7 +19,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
+import { homedir } from './home';
 import {
   AgentTarget,
   DetectionResult,
@@ -45,7 +45,7 @@ import {
 
 function configDir(loc: Location): string {
   return loc === 'global'
-    ? path.join(os.homedir(), '.claude')
+    ? path.join(homedir(), '.claude')
     : path.join(process.cwd(), '.claude');
 }
 function mcpJsonPath(loc: Location): string {
@@ -53,7 +53,7 @@ function mcpJsonPath(loc: Location): string {
   // local  → ./.mcp.json (project scope: the ONLY project-level MCP
   // file Claude Code reads — NOT ./.claude.json, which it ignores).
   return loc === 'global'
-    ? path.join(os.homedir(), '.claude.json')
+    ? path.join(homedir(), '.claude.json')
     : path.join(process.cwd(), '.mcp.json');
 }
 /**

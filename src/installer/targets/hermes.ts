@@ -16,7 +16,6 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import * as os from 'os';
 import {
   AgentTarget,
   DetectionResult,
@@ -25,6 +24,7 @@ import {
   WriteResult,
 } from './types';
 import { atomicWriteFileSync } from './shared';
+import { homedir } from './home';
 
 type LineRange = { start: number; end: number };
 
@@ -105,7 +105,7 @@ class HermesTarget implements AgentTarget {
 function hermesHome(): string {
   return process.env.HERMES_HOME
     ? path.resolve(process.env.HERMES_HOME)
-    : path.join(os.homedir(), '.hermes');
+    : path.join(homedir(), '.hermes');
 }
 
 function configPath(): string {
